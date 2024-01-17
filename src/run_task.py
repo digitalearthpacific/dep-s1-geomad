@@ -95,6 +95,11 @@ class S1Processor(Processor):
 
         # Merge the arrays together into a Dataset with the names we want
         data = merge(arrays, compat="override")
+
+        # Set nodata on all the outputs
+        for band in data.data_vars:
+            data[band].attrs["nodata"] = -32768
+
         output = set_stac_properties(input_data, data)
         return output
 
@@ -139,6 +144,7 @@ def main(
             groupby="solar_day",
             bands=["vv", "vh"],
         ),
+        nodata_value=-32768,
     )
 
     log.info("Configuring processor")
