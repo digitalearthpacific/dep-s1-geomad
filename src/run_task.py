@@ -77,12 +77,14 @@ class S1Processor(Processor):
     def __init__(
         self,
         send_area_to_processor: bool = False,
+        load_data_before_writing: bool = True,
         drop_vars: list[str] = [],
     ) -> None:
         super().__init__(
             send_area_to_processor,
         )
         self.drop_vars = drop_vars
+        self.load_data_before_writing = load_data_before_writing
 
     def process(self, input_data: DataArray) -> Dataset:
         input_data["vv_vh"] = input_data["vv"] / input_data["vh"]
@@ -101,6 +103,10 @@ class S1Processor(Processor):
             data[band].attrs["nodata"] = -32768
 
         output = set_stac_properties(input_data, data)
+
+        if self.load_data_before_writing:
+            output = output.compute()
+
         return output
 
 
@@ -108,14 +114,14 @@ def main(
     region_code: Annotated[str, typer.Option()],
     datetime: Annotated[str, typer.Option()],
     version: Annotated[str, typer.Option()],
-    dataset_id: str = "geomad",
-    base_product: str = "ls",
+    dataset_id: str = "mosaic",
     memory_limit_per_worker: str = "50GB",
     n_workers: int = 2,
     threads_per_worker: int = 32,
     xy_chunk_size: int = 4096,
     overwrite: Annotated[bool, typer.Option()] = False,
 ) -> None:
+    base_product = "s1"
     grid = get_grid()
     area = grid.loc[[region_code]]
 
@@ -148,9 +154,7 @@ def main(
     )
 
     log.info("Configuring processor")
-    processor = S1Processor(
-        keep_ints=True,
-    )
+    processor = S1Processor()
 
     log.info("Configuring writer")
     writer = AzureDsWriter(
