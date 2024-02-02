@@ -48,14 +48,19 @@ def get_grid() -> gpd.GeoDataFrame:
 class Sentinel1LoaderMixin(object):
     def __init__(
         self,
+        only_search_descending: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self.only_search_descending = only_search_descending
 
     def _get_items(self, area):
+        query = {}
+        if self.only_search_descending:
+            query["sat:orbit_state"] = {"eq": "descending"}
         # Do the search
         item_collection = search_across_180(
-            area, collections=["sentinel-1-rtc"], datetime=self.datetime
+            area, collections=["sentinel-1-rtc"], datetime=self.datetime, query=query
         )
 
         # Fix a few issues with STAC items
@@ -87,13 +92,14 @@ class S1Processor(Processor):
         self.load_data_before_writing = load_data_before_writing
 
     def process(self, input_data: DataArray) -> Dataset:
-        input_data["vv_vh"] = input_data["vv"] / input_data["vh"]
-
         arrays = []
-        for band in ["vv", "vh", "vv_vh"]:
+        for band in ["vv", "vh"]:
             arrays.append(input_data[band].median("time").rename(f"median_{band}"))
             arrays.append(input_data[band].mean("time").rename(f"mean_{band}"))
             arrays.append(input_data[band].std("time").rename(f"std_{band}"))
+
+        # Add count
+        arrays.append(input_data["vv"].count("time").rename("count"))
 
         # Merge the arrays together into a Dataset with the names we want
         data = merge(arrays, compat="override")
