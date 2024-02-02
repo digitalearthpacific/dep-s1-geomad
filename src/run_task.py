@@ -63,10 +63,6 @@ class Sentinel1LoaderMixin(object):
             area, collections=["sentinel-1-rtc"], datetime=self.datetime, query=query
         )
 
-        # Fix a few issues with STAC items
-        # fix_bad_epsgs(item_collection)
-        # item_collection = remove_bad_items(item_collection)
-
         if len(item_collection) == 0:
             raise EmptyCollectionError()
 
@@ -99,14 +95,17 @@ class S1Processor(Processor):
             arrays.append(input_data[band].std("time").rename(f"std_{band}"))
 
         # Add count
-        arrays.append(input_data["vv"].count("time").rename("count"))
+        arrays.append(input_data["vv"].count("time").rename("count").astype("int16"))
 
         # Merge the arrays together into a Dataset with the names we want
         data = merge(arrays, compat="override")
 
         # Set nodata on all the outputs
         for band in data.data_vars:
-            data[band].attrs["nodata"] = -32768
+            if band == "count":
+                data[band].attrs["nodata"] = 0
+            else:
+                data[band].attrs["nodata"] = -32768
 
         output = set_stac_properties(input_data, data)
 
