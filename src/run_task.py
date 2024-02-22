@@ -1,38 +1,25 @@
-from logging import INFO, Formatter, Logger, StreamHandler, getLogger
-
 import geopandas as gpd
 import typer
 from dask.distributed import Client
 from dep_tools.azure import blob_exists
 from dep_tools.exceptions import EmptyCollectionError
-from dep_tools.loaders import OdcLoaderMixin, StackXrLoader
+from dep_tools.loaders import OdcLoader
+
 from dep_tools.namers import DepItemPath
 from dep_tools.processors import Processor
+from dep_tools.searchers import PystacSearcher
 from dep_tools.stac_utils import set_stac_properties
+from dep_tools.utils import get_logger
+
+import boto3
 
 # from dep_tools.task import SimpleLoggingAreaTask
-from dep_tools.task import SimpleLoggingAreaTask
-from dep_tools.utils import search_across_180
-from dep_tools.writers import AzureDsWriter
+from dep_tools.writers import AzureDsWriter, AwsDsCogWriter
+from planetary_computer import sign_url
 from typing_extensions import Annotated
 from xarray import DataArray, Dataset, merge
 
-
-def get_logger(region_code: str) -> Logger:
-    """Set up a simple logger"""
-    console = StreamHandler()
-    time_format = "%Y-%m-%d %H:%M:%S"
-    console.setFormatter(
-        Formatter(
-            fmt=f"%(asctime)s %(levelname)s ({region_code}):  %(message)s",
-            datefmt=time_format,
-        )
-    )
-
-    log = getLogger("S1M")
-    log.addHandler(console)
-    log.setLevel(INFO)
-    return log
+from dep_tools.aws import object_exists
 
 
 def get_grid() -> gpd.GeoDataFrame:
@@ -45,47 +32,18 @@ def get_grid() -> gpd.GeoDataFrame:
     )
 
 
-class Sentinel1LoaderMixin(object):
-    def __init__(
-        self,
-        only_search_descending: bool = True,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.only_search_descending = only_search_descending
-
-    def _get_items(self, area):
-        query = {}
-        if self.only_search_descending:
-            query["sat:orbit_state"] = {"eq": "descending"}
-        # Do the search
-        item_collection = search_across_180(
-            area, collections=["sentinel-1-rtc"], datetime=self.datetime, query=query
-        )
-
-        if len(item_collection) == 0:
-            raise EmptyCollectionError()
-
-        return item_collection
-
-
-class Sentinel1Loader(Sentinel1LoaderMixin, OdcLoaderMixin, StackXrLoader):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-
 class S1Processor(Processor):
     def __init__(
         self,
         send_area_to_processor: bool = False,
-        load_data_before_writing: bool = True,
+        load_data: bool = False,
         drop_vars: list[str] = [],
     ) -> None:
         super().__init__(
             send_area_to_processor,
         )
         self.drop_vars = drop_vars
-        self.load_data_before_writing = load_data_before_writing
+        self.load_data = load_data
 
     def process(self, input_data: DataArray) -> Dataset:
         arrays = []
@@ -109,7 +67,7 @@ class S1Processor(Processor):
 
         output = set_stac_properties(input_data, data)
 
-        if self.load_data_before_writing:
+        if self.load_data:
             output = output.compute()
 
         return output
@@ -120,6 +78,8 @@ def main(
     datetime: Annotated[str, typer.Option()],
     version: Annotated[str, typer.Option()],
     dataset_id: str = "mosaic",
+    output_bucket: str = None,
+    output_resolution: int = 10,
     memory_limit_per_worker: str = "50GB",
     n_workers: int = 2,
     threads_per_worker: int = 32,
@@ -130,8 +90,8 @@ def main(
     grid = get_grid()
     area = grid.loc[[region_code]]
 
-    log = get_logger(region_code)
-    log.info(f"Starting processing for {region_code}")
+    log = get_logger(region_code, "Sentinel-1-Mosaic")
+    log.info(f"Starting processing version {version} for {datetime}")
 
     itempath = DepItemPath(
         base_product, dataset_id, version, datetime, zero_pad_numbers=True
@@ -139,45 +99,66 @@ def main(
     stac_document = itempath.stac_path(region_code)
 
     # If we don't want to overwrite, and the destination file already exists, skip it
-    if not overwrite and blob_exists(stac_document):
-        log.info(f"Item already exists at {stac_document}")
-        # This is an exit with success
-        raise typer.Exit()
+    if not overwrite:
+        already_done = False
+        if output_bucket is None:
+            # The Azure case
+            already_done = blob_exists(stac_document)
+        else:
+            # The AWS case
+            already_done = object_exists(output_bucket, stac_document)
 
-    loader = Sentinel1Loader(
-        epsg=3832,
+        if already_done:
+            log.info(f"Item already exists at {stac_document}")
+            # This is an exit with success
+            raise typer.Exit()
+
+    # A searcher to find the data
+    searcher = PystacSearcher(
+        catalog="https://planetarycomputer.microsoft.com/api/stac/v1/",
+        collections=["sentinel-1-rtc"],
         datetime=datetime,
-        dask_chunksize=dict(time=1, x=xy_chunk_size, y=xy_chunk_size),
-        load_as_dataset=True,
-        odc_load_kwargs=dict(
-            fail_on_error=False,
-            resolution=10,
-            groupby="solar_day",
-            bands=["vv", "vh"],
-        ),
-        nodata_value=-32768,
+        query={"sat:orbit_state": {"eq": "descending"}},
     )
 
-    log.info("Configuring processor")
+    # A loader to load them
+    loader = OdcLoader(
+        crs=3832,
+        resolution=output_resolution,
+        bands=["vv", "vh"],
+        groupby="solar_day",
+        chunks=dict(time=1, x=xy_chunk_size, y=xy_chunk_size),
+        fail_on_error=False,
+        patch_url=sign_url,
+        overwrite=overwrite,
+    )
+
+    # A processor to process them
     processor = S1Processor()
 
-    log.info("Configuring writer")
-    writer = AzureDsWriter(
-        itempath=itempath,
-        overwrite=overwrite,
-        convert_to_int16=False,
-        extra_attrs=dict(dep_version=version),
-        write_multithreaded=True,
-    )
-
-    runner = SimpleLoggingAreaTask(
-        id=region_code,
-        area=area,
-        loader=loader,
-        processor=processor,
-        writer=writer,
-        logger=log,
-    )
+    # And a writer to bind them
+    if output_bucket is None:
+        log.info("Writing with Azure writer")
+        writer = AzureDsWriter(
+            itempath=itempath,
+            overwrite=overwrite,
+            convert_to_int16=False,
+            extra_attrs=dict(dep_version=version),
+            write_multithreaded=True,
+            load_before_write=True,
+        )
+    else:
+        log.info("Writing with AWS writer")
+        client = boto3.client("s3")
+        writer = AwsDsCogWriter(
+            itempath=itempath,
+            overwrite=overwrite,
+            convert_to_int16=False,
+            extra_attrs=dict(dep_version=version),
+            write_multithreaded=True,
+            bucket="files.auspatious.com",
+            client=client,
+        )
 
     with Client(
         n_workers=n_workers,
@@ -185,8 +166,24 @@ def main(
         memory_limit=memory_limit_per_worker,
     ):
         try:
-            paths = runner.run()
-            log.info(f"Completed writing to {paths[-1]}")
+            # Run the task
+            items = searcher.search(area)
+            log.info(f"Found {len(items)} items")
+
+            data = loader.load(items, area)
+            log.info(f"Found {len(data.time)} timesteps to load")
+
+            output_data = processor.process(data)
+            log.info(
+                f"Processed data to shape {[output_data.sizes[d] for d in ['x', 'y']]}"
+            )
+
+            paths = writer.write(output_data, region_code)
+            if paths is not None:
+                log.info(f"Completed writing to {paths[-1]}")
+            else:
+                log.warning("No paths returned from writer")
+
         except EmptyCollectionError:
             log.warning("No data found for this tile.")
         except Exception as e:
