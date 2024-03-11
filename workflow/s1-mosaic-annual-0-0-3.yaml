@@ -26,7 +26,7 @@ spec:
   arguments:
     parameters:
     - name: version
-      value: "0.0.2"  # The version of the data product being made
+      value: "0.0.3b"  # The version of the data product being made
     - name: image-name
       value: "dep-s1-mosaic"  # The Docker image
     - name: image-tag
@@ -48,7 +48,7 @@ spec:
               - name: regions
                 value: "FJ"  # Comma separated list "FJ,TO" or 'ALL'
               - name: limit
-                value: "9999"
+                value: "5"
               - name: datetime
                 value: "2023"  # One year "2022", or a period "2020-2021"
               - name: version
