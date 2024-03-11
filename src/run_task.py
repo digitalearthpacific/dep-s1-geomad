@@ -22,13 +22,26 @@ from xarray import DataArray, Dataset, merge
 from dep_tools.aws import object_exists
 
 
-def get_grid() -> gpd.GeoDataFrame:
+def get_tiles() -> gpd.GeoDataFrame:
     return (
         gpd.read_file(
             "https://raw.githubusercontent.com/digitalearthpacific/dep-grid/master/grid_pacific.geojson"
         )
         .astype({"tile_id": str, "country_code": str})
         .set_index(["tile_id", "country_code"], drop=False)
+    )
+
+
+def get_item_path(
+    base_product: str, version: str, year: int, prefix: str
+) -> DepItemPath:
+    return DepItemPath(
+        base_product,
+        "mosaic",
+        version,
+        year,
+        zero_pad_numbers=True,
+        prefix=prefix,
     )
 
 
@@ -77,7 +90,6 @@ def main(
     region_code: Annotated[str, typer.Option()],
     datetime: Annotated[str, typer.Option()],
     version: Annotated[str, typer.Option()],
-    dataset_id: str = "mosaic",
     output_bucket: str = None,
     output_resolution: int = 10,
     memory_limit_per_worker: str = "50GB",
@@ -87,15 +99,14 @@ def main(
     overwrite: Annotated[bool, typer.Option()] = False,
 ) -> None:
     base_product = "s1"
-    grid = get_grid()
-    area = grid.loc[[region_code]]
+    tiles = get_tiles()
+    area = tiles.loc[[region_code]]
 
     log = get_logger(region_code, "Sentinel-1-Mosaic")
     log.info(f"Starting processing version {version} for {datetime}")
 
-    itempath = DepItemPath(
-        base_product, dataset_id, version, datetime, zero_pad_numbers=True
-    )
+    itempath = get_item_path(base_product, version, datetime, prefix="dep")
+
     stac_document = itempath.stac_path(region_code)
 
     # If we don't want to overwrite, and the destination file already exists, skip it
@@ -156,7 +167,7 @@ def main(
             convert_to_int16=False,
             extra_attrs=dict(dep_version=version),
             write_multithreaded=True,
-            bucket="files.auspatious.com",
+            bucket=output_bucket,
             client=client,
         )
 
