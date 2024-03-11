@@ -87,8 +87,8 @@ class S1Processor(Processor):
 
 
 def main(
-    region_code: Annotated[str, typer.Option()],
-    datetime: Annotated[str, typer.Option()],
+    tile_id: Annotated[str, typer.Option()],
+    year: Annotated[str, typer.Option()],
     version: Annotated[str, typer.Option()],
     output_bucket: str = None,
     output_resolution: int = 10,
@@ -100,14 +100,14 @@ def main(
 ) -> None:
     base_product = "s1"
     tiles = get_tiles()
-    area = tiles.loc[[region_code]]
+    area = tiles.loc[[tile_id]]
 
-    log = get_logger(region_code, "Sentinel-1-Mosaic")
-    log.info(f"Starting processing version {version} for {datetime}")
+    log = get_logger(tile_id, "Sentinel-1-Mosaic")
+    log.info(f"Starting processing version {version} for {year}")
 
-    itempath = get_item_path(base_product, version, datetime, prefix="dep")
+    itempath = get_item_path(base_product, version, year, prefix="dep")
 
-    stac_document = itempath.stac_path(region_code)
+    stac_document = itempath.stac_path(tile_id)
 
     # If we don't want to overwrite, and the destination file already exists, skip it
     if not overwrite:
@@ -128,7 +128,7 @@ def main(
     searcher = PystacSearcher(
         catalog="https://planetarycomputer.microsoft.com/api/stac/v1/",
         collections=["sentinel-1-rtc"],
-        datetime=datetime,
+        datetime=year,
         query={"sat:orbit_state": {"eq": "descending"}},
     )
 
@@ -189,7 +189,7 @@ def main(
                 f"Processed data to shape {[output_data.sizes[d] for d in ['x', 'y']]}"
             )
 
-            paths = writer.write(output_data, region_code)
+            paths = writer.write(output_data, tile_id)
             if paths is not None:
                 log.info(f"Completed writing to {paths[-1]}")
             else:
@@ -198,7 +198,7 @@ def main(
         except EmptyCollectionError:
             log.warning("No data found for this tile.")
         except Exception as e:
-            log.exception(f"Failed to process {region_code} with error: {e}")
+            log.exception(f"Failed to process {tile_id} with error: {e}")
             raise typer.Exit(code=1)
 
 
